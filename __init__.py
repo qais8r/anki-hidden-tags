@@ -5,7 +5,7 @@ from typing import Any
 
 import aqt
 from aqt import gui_hooks
-from aqt.browser import Browser, SidebarItem, SidebarItemType, SidebarStage, SidebarTreeView
+from aqt.browser import Browser, SidebarItem, SidebarItemType, SidebarTreeView
 from aqt.qt import (
     QAbstractItemView,
     QAction,
@@ -23,7 +23,7 @@ from aqt.qt import (
     QWidget,
 )
 
-ADDON_NAME = __name__
+ADDON_NAME = __name__.split(".")[0]
 DEFAULT_CONFIG: dict[str, Any] = {
     "hidden_tags": [],
     "show_hide_hint": True,
@@ -35,6 +35,7 @@ HIDE_HINT_TEXT = "Tag hidden. You can unhide tags from Tools > Hidden Tags."
 
 _tools_menu_action: QAction | None = None
 _installed = False
+_original_tag_tree_builder: Any | None = None
 
 
 def _normalize_hidden_tags(values: Iterable[Any]) -> list[str]:
@@ -163,9 +164,9 @@ def _maybe_show_hide_hint_once(parent: QWidget | None = None) -> None:
 
     dialog.exec()
 
-    # This acts as a first-use hint gate; once shown, we disable future hints.
-    config["show_hide_hint"] = False
-    _save_config(config)
+    if dont_show_again.isChecked():
+        config["show_hide_hint"] = False
+        _save_config(config)
 
 
 def _hide_sidebar_tag(sidebar: SidebarTreeView, full_tag_path: str) -> None:
@@ -173,6 +174,7 @@ def _hide_sidebar_tag(sidebar: SidebarTreeView, full_tag_path: str) -> None:
         return
 
     if _add_hidden_tag(full_tag_path):
+        sidebar.refresh()
         _refresh_open_browser_sidebars()
         _maybe_show_hide_hint_once(parent=sidebar)
 
@@ -199,30 +201,26 @@ def _filter_hidden_tags_in_tree(tree: SidebarItem, hidden_tags: set[str]) -> Non
         return
 
 
-def _on_browser_will_build_tree(
-    handled: bool,
-    tree: SidebarItem,
-    stage: SidebarStage,
-    browser: Browser,
-) -> bool:
-    if handled or stage != SidebarStage.TAGS:
-        return handled
+def _patch_sidebar_tag_tree_builder() -> None:
+    global _original_tag_tree_builder
 
-    hidden_tags = _hidden_tags_set()
-    if not hidden_tags:
-        return handled
+    if _original_tag_tree_builder is not None:
+        return
 
-    sidebar = getattr(browser, "sidebar", None)
-    if sidebar is None:
-        return handled
+    original = getattr(SidebarTreeView, "_tag_tree", None)
+    if not callable(original):
+        return
 
-    default_tag_tree_builder = getattr(sidebar, "_tag_tree", None)
-    if not callable(default_tag_tree_builder):
-        return handled
+    _original_tag_tree_builder = original
 
-    default_tag_tree_builder(tree)
-    _filter_hidden_tags_in_tree(tree, hidden_tags)
-    return True
+    def wrapped_tag_tree(sidebar: SidebarTreeView, root: SidebarItem) -> None:
+        _original_tag_tree_builder(sidebar, root)
+        hidden_tags = _hidden_tags_set()
+        if hidden_tags:
+            # Filter hidden tags every time Anki rebuilds the sidebar tag tree.
+            _filter_hidden_tags_in_tree(root, hidden_tags)
+
+    SidebarTreeView._tag_tree = wrapped_tag_tree
 
 
 def _on_sidebar_context_menu(
@@ -326,6 +324,8 @@ def _install_hooks() -> None:
     if _installed:
         return
 
+    _patch_sidebar_tag_tree_builder()
+
     if hasattr(gui_hooks, "main_window_did_init"):
         gui_hooks.main_window_did_init.append(_add_tools_menu_entry)
     else:
@@ -333,9 +333,6 @@ def _install_hooks() -> None:
 
     if hasattr(gui_hooks, "browser_sidebar_will_show_context_menu"):
         gui_hooks.browser_sidebar_will_show_context_menu.append(_on_sidebar_context_menu)
-
-    if hasattr(gui_hooks, "browser_will_build_tree"):
-        gui_hooks.browser_will_build_tree.append(_on_browser_will_build_tree)
 
     _installed = True
 

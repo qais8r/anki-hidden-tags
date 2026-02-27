@@ -1,6 +1,12 @@
 # Hidden Tags
 
-Hide tags from the Browser sidebar without changing note/card tag data.
+Install the Anki addon from [AnkiWeb](https://ankiweb.net/shared/info/1129879202).
+
+## Description
+
+Hide tags from the Browser sidebar without changing or deleting note/card tag data.
+
+![Demo GIF showing the process of hiding and unhiding a tag](https://github.com/qais8r/anki-hidden-tags/blob/main/assets/demo.gif?raw=true)
 
 ## Usage
 

@@ -1,15 +1,19 @@
-### `hidden_tags`
+# Hidden Tags
 
-- Type: `list[string]`
-- Default: `[]`
-- Purpose: full tag paths hidden from the Browser sidebar.
-- Example: `"A::B::C"`
+Hide full tag paths from the Browser sidebar.
 
 Only sidebar visibility is affected. Note/card tags are not changed.
 
-### `show_hide_hint`
+- **Type:** `list[string]`
+- **Default:** `[]`
+- **Example:** `"A::B::C"`
 
-- Type: `boolean`
-- Default: `true`
-- Purpose: controls whether the hide hint dialog can be shown.
-- Hint message: `Tag hidden. You can unhide tags from Tools > Hidden Tags.`
+---
+
+# Hide Hint Dialog
+
+Controls whether the hide confirmation message is shown.
+
+- **Type:** `boolean`
+- **Default:** `true`
+- **Message:** `Tag hidden. You can manage hidden tags from Tools > Hidden Tags.`

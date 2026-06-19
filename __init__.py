@@ -19,6 +19,9 @@ from aqt.qt import (
     QMenu,
     QModelIndex,
     QPushButton,
+    Qt,
+    QTreeWidget,
+    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -31,7 +34,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
 
 MENU_HIDE_TAG = "Hide Tag"
 MENU_HIDDEN_TAGS = "Hidden Tags"
-HIDE_HINT_TEXT = "Tag hidden. You can unhide tags from Tools > Hidden Tags."
+HIDE_HINT_TEXT = "Tag hidden. You can manage hidden tags from Tools > Hidden Tags."
+
+TAG_SEPARATOR = "::"
+QT_USER_ROLE = getattr(getattr(Qt, "ItemDataRole", Qt), "UserRole")
 
 _tools_menu_action: QAction | None = None
 _installed = False
@@ -87,16 +93,107 @@ def _save_config(config: dict[str, Any]) -> None:
     aqt.mw.addonManager.writeConfig(ADDON_NAME, config)
 
 
-def _add_hidden_tag(full_tag_path: str) -> bool:
-    config = _load_config()
-    hidden_tags: list[str] = config["hidden_tags"]
-    if full_tag_path in hidden_tags:
+def _add_hidden_tags(full_tag_paths: Iterable[str]) -> bool:
+    new_hidden_tags = _normalize_hidden_tags(full_tag_paths)
+    if not new_hidden_tags:
         return False
 
-    hidden_tags.append(full_tag_path)
-    config["hidden_tags"] = _normalize_hidden_tags(hidden_tags)
+    config = _load_config()
+    hidden_tags: list[str] = config["hidden_tags"]
+    hidden_tags_set = set(hidden_tags)
+    tags_to_add = [tag for tag in new_hidden_tags if tag not in hidden_tags_set]
+    if not tags_to_add:
+        return False
+
+    config["hidden_tags"] = _normalize_hidden_tags([*hidden_tags, *tags_to_add])
     _save_config(config)
     return True
+
+
+def _add_hidden_tag(full_tag_path: str) -> bool:
+    return _add_hidden_tags([full_tag_path])
+
+
+def _tag_path_prefixes(full_tag_path: str) -> list[str]:
+    parts = [part for part in full_tag_path.split(TAG_SEPARATOR) if part]
+    prefixes: list[str] = []
+    for index in range(1, len(parts) + 1):
+        prefixes.append(TAG_SEPARATOR.join(parts[:index]))
+    return prefixes
+
+
+def _has_tag_ancestor(full_tag_path: str, ancestor_tags: set[str]) -> bool:
+    prefixes = _tag_path_prefixes(full_tag_path)
+    return any(prefix in ancestor_tags for prefix in prefixes[:-1])
+
+
+def _collapse_descendant_tags(full_tag_paths: Iterable[str]) -> list[str]:
+    collapsed: list[str] = []
+    collapsed_set: set[str] = set()
+    for tag in sorted(
+        set(full_tag_paths),
+        key=lambda tag: (tag.count(TAG_SEPARATOR), tag.casefold()),
+    ):
+        if _has_tag_ancestor(tag, collapsed_set):
+            continue
+        collapsed.append(tag)
+        collapsed_set.add(tag)
+    return collapsed
+
+
+def _collection_tag_paths() -> list[str]:
+    if aqt.mw is None:
+        return []
+
+    col = getattr(aqt.mw, "col", None)
+    tag_manager = getattr(col, "tags", None)
+    if tag_manager is None:
+        return []
+
+    raw_tags: Iterable[Any] | None = None
+    for method_name in ("all", "all_names"):
+        method = getattr(tag_manager, method_name, None)
+        if not callable(method):
+            continue
+        try:
+            raw_tags = method()
+        except Exception:
+            continue
+        break
+
+    if raw_tags is None:
+        method = getattr(tag_manager, "all_names_and_counts", None)
+        if callable(method):
+            try:
+                raw_tags = [name for name, _count in method()]
+            except Exception:
+                raw_tags = None
+
+    if raw_tags is None:
+        return []
+
+    tag_paths: set[str] = set()
+    for value in raw_tags:
+        if not isinstance(value, str):
+            continue
+        tag = value.strip()
+        if not tag:
+            continue
+        tag_paths.update(_tag_path_prefixes(tag))
+
+    return sorted(
+        tag_paths,
+        key=lambda tag: tuple(part.casefold() for part in tag.split(TAG_SEPARATOR)),
+    )
+
+
+def _visible_collection_tag_paths() -> list[str]:
+    hidden_tags = _hidden_tags_set()
+    return [
+        tag
+        for tag in _collection_tag_paths()
+        if tag not in hidden_tags and not _has_tag_ancestor(tag, hidden_tags)
+    ]
 
 
 def _remove_hidden_tags(tags_to_remove: Iterable[str]) -> bool:
@@ -242,6 +339,106 @@ def _on_sidebar_context_menu(
     )
 
 
+class HideTagsDialog(QDialog):
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Hide Tags")
+        self.resize(620, 540)
+        self._tree_expanded = True
+
+        layout = QVBoxLayout(self)
+
+        header_layout = QHBoxLayout()
+        header_layout.addWidget(QLabel("Visible tags:", self))
+        header_layout.addStretch()
+
+        self.expand_toggle_button = QPushButton("Collapse All", self)
+        self.expand_toggle_button.clicked.connect(self._toggle_expanded)
+        header_layout.addWidget(self.expand_toggle_button)
+        layout.addLayout(header_layout)
+
+        self.tree_widget = QTreeWidget(self)
+        self.tree_widget.setHeaderHidden(True)
+        self.tree_widget.setAlternatingRowColors(True)
+        self.tree_widget.setAnimated(True)
+        self.tree_widget.setIndentation(18)
+        self.tree_widget.setSelectionMode(
+            QAbstractItemView.SelectionMode.ExtendedSelection
+        )
+        self.tree_widget.itemSelectionChanged.connect(self._update_button_state)
+        layout.addWidget(self.tree_widget)
+
+        actions_layout = QHBoxLayout()
+        actions_layout.addStretch()
+
+        self.hide_selected_button = QPushButton("Hide Selected", self)
+        self.hide_selected_button.setDefault(True)
+        self.hide_selected_button.clicked.connect(self._hide_selected)
+        actions_layout.addWidget(self.hide_selected_button)
+
+        close_button = QPushButton("Close", self)
+        close_button.clicked.connect(self.reject)
+        actions_layout.addWidget(close_button)
+        layout.addLayout(actions_layout)
+
+        self._refresh_tree()
+
+    def _refresh_tree(self) -> None:
+        signals_were_blocked = self.tree_widget.blockSignals(True)
+        try:
+            self.tree_widget.clear()
+
+            items_by_path: dict[str, QTreeWidgetItem] = {}
+            for full_tag_path in _visible_collection_tag_paths():
+                parent_item: QTreeWidgetItem | None = None
+                for path in _tag_path_prefixes(full_tag_path):
+                    item = items_by_path.get(path)
+                    if item is None:
+                        item = QTreeWidgetItem([path.split(TAG_SEPARATOR)[-1]])
+                        item.setData(0, QT_USER_ROLE, path)
+                        if parent_item is None:
+                            self.tree_widget.addTopLevelItem(item)
+                        else:
+                            parent_item.addChild(item)
+                        items_by_path[path] = item
+                    parent_item = item
+        finally:
+            self.tree_widget.blockSignals(signals_were_blocked)
+
+        self.tree_widget.expandAll()
+        self._tree_expanded = True
+        self.expand_toggle_button.setText("Collapse All")
+        self._update_button_state()
+
+    def _toggle_expanded(self) -> None:
+        if self._tree_expanded:
+            self.tree_widget.collapseAll()
+            self.expand_toggle_button.setText("Expand All")
+        else:
+            self.tree_widget.expandAll()
+            self.expand_toggle_button.setText("Collapse All")
+        self._tree_expanded = not self._tree_expanded
+
+    def _selected_tags(self) -> list[str]:
+        selected_tags: list[str] = []
+        for item in self.tree_widget.selectedItems():
+            tag = item.data(0, QT_USER_ROLE)
+            if isinstance(tag, str) and tag:
+                selected_tags.append(tag)
+        return _collapse_descendant_tags(selected_tags)
+
+    def _update_button_state(self) -> None:
+        self.hide_selected_button.setEnabled(len(self._selected_tags()) > 0)
+
+    def _hide_selected(self) -> None:
+        selected_tags = self._selected_tags()
+        if _add_hidden_tags(selected_tags):
+            _refresh_open_browser_sidebars()
+            self.accept()
+        else:
+            self._update_button_state()
+
+
 class HiddenTagsDialog(QDialog):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -249,6 +446,11 @@ class HiddenTagsDialog(QDialog):
         self.resize(440, 340)
 
         layout = QVBoxLayout(self)
+
+        self.hide_tags_button = QPushButton("Hide Tags...", self)
+        self.hide_tags_button.clicked.connect(self._open_hide_tags_dialog)
+        layout.addWidget(self.hide_tags_button)
+
         layout.addWidget(QLabel("Hidden tags:", self))
 
         self.list_widget = QListWidget(self)
@@ -297,6 +499,11 @@ class HiddenTagsDialog(QDialog):
         if _clear_hidden_tags():
             _refresh_open_browser_sidebars()
         self._refresh_list()
+
+    def _open_hide_tags_dialog(self) -> None:
+        dialog = HideTagsDialog(self)
+        if dialog.exec():
+            self._refresh_list()
 
 
 def _open_hidden_tags_dialog() -> None:
